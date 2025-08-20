@@ -206,6 +206,9 @@ INPUT="${OFF}"
 SECTION="----------\n"
 
 self_update() {
+	echo "Skipping self-update"
+	return
+
     [ "$UPDATE_GUARD" ] && return
     export UPDATE_GUARD=YES
     clear
@@ -1754,7 +1757,7 @@ UNINSTALL=0
 NOSERVICE=0
 INSTALL_KLIPPER_SCREEN_ONLY=0
 PRINTER_CONFIG=printer.cfg
-KLIPPER_SERVICE=klipper.service
+KLIPPER_SERVICE=klipper-ender.service
 
 while getopts "a:b:k:c:m:r:idsz" arg; do
     case $arg in

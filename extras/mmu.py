@@ -598,6 +598,7 @@ class Mmu:
         self.servo_angles['down'] = config.getint('servo_down_angle', 90)
         self.servo_angles['up'] = config.getint('servo_up_angle', 90)
         self.servo_angles['move'] = config.getint('servo_move_angle', self.servo_angles['up'])
+        self.servo_relax_angle = config.getint('servo_relax_angle', self.servo_angles['down'])
         self.servo_duration = config.getfloat('servo_duration', 0.2, minval=0.1)
         self.servo_always_active = config.getint('servo_always_active', 0, minval=0, maxval=1)
         self.servo_active_down = config.getint('servo_active_down', 0, minval=0, maxval=1)
@@ -2449,7 +2450,11 @@ class Mmu:
                 self._trace_filament_move(None, 0.8, speed=25, accel=self.gear_buzz_accel, encoder_dwell=None)
                 self._trace_filament_move(None, -0.8, speed=25, accel=self.gear_buzz_accel, encoder_dwell=None)
             self.movequeues_dwell(max(self.servo_dwell, self.servo_duration, 0))
-        self.servo_angle = self.servo_angles['down']
+        # Have the motor back-off from the down position by a few degrees to relax gearbox backlash
+        self.log_debug("Relaxing servo from down position at angle: %d" % self.servo_relax_angle)
+        self.movequeues_dwell(max(self.servo_dwell, self.servo_duration, 0))
+        self.servo.set_position(angle=self.servo_relax_angle, duration=None if self.servo_active_down or self.servo_always_active else self.servo_duration)
+        self.servo_angle = self.servo_relax_angle 
         self.servo_state = self.SERVO_DOWN_STATE
         self._mmu_macro_event(self.MACRO_EVENT_FILAMENT_ENGAGED)
 
