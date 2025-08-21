@@ -156,6 +156,7 @@ class Mmu:
     CALIBRATED_GATES    = 0b10000
     CALIBRATED_ALL      = 0b01111 # Calibrated gates is optional
 
+    SERVO_RELAX_STATE = 3
     SERVO_MOVE_STATE = 2
     SERVO_DOWN_STATE = 1
     SERVO_UP_STATE = 0
@@ -289,6 +290,7 @@ class Mmu:
     VARS_MMU_SELECTOR_BYPASS         = "mmu_selector_bypass"
     VARS_MMU_ENCODER_RESOLUTION      = "mmu_encoder_resolution"
     VARS_MMU_GEAR_ROTATION_DISTANCES = "mmu_gear_rotation_distances"
+    VARS_MMU_SERVO_MOVE_ANGLE        = "mmu_servo_move_angle"
     VARS_MMU_SERVO_ANGLES            = "mmu_servo_angles"
 
     VARS_MMU_GEAR_ROTATION_DISTANCE  = "mmu_gear_rotation_distance" # Deprecated
@@ -594,11 +596,13 @@ class Mmu:
         self.sync_feedback_enable = config.getint('sync_feedback_enable', 0, minval=0, maxval=1)
 
         # Servo control
-        self.servo_angles = {}
-        self.servo_angles['down'] = config.getint('servo_down_angle', 90)
-        self.servo_angles['up'] = config.getint('servo_up_angle', 90)
-        self.servo_angles['move'] = config.getint('servo_move_angle', self.servo_angles['up'])
-        self.servo_relax_angle = config.getint('servo_relax_angle', self.servo_angles['down'])
+        self.servo_angles = []
+        for i in range(self.mmu_num_gates):
+            self.servo_angles.append({})
+            self.servo_angles[i]['down'] = config.getint('servo_down_angle', 90)
+            self.servo_angles[i]['up'] = config.getint('servo_up_angle', 90)
+            self.servo_angles[i]['relax'] = config.getint('servo_relax_angle', self.servo_angles[i]['down'])
+        self.servo_move_angle = config.getint('servo_move_angle', self.servo_angles[0]['up'])
         self.servo_duration = config.getfloat('servo_duration', 0.2, minval=0.1)
         self.servo_always_active = config.getint('servo_always_active', 0, minval=0, maxval=1)
         self.servo_active_down = config.getint('servo_active_down', 0, minval=0, maxval=1)
@@ -1071,8 +1075,13 @@ class Mmu:
 
         # Override with saved/calibrated servo positions
         try:
-            servo_angles = self.save_variables.allVariables.get(self.VARS_MMU_SERVO_ANGLES, {})
-            self.servo_angles.update(servo_angles)
+            servo_move_angle = self.save_variables.allVariables.get(self.VARS_MMU_SERVO_MOVE_ANGLE, None)
+            servo_angles = self.save_variables.allVariables.get(self.VARS_MMU_SERVO_ANGLES, [])
+            if servo_move_angle != None:
+                self.servo_move_angle = servo_move_angle
+            if len(servo_angles) == self.mmu_num_gates:
+                for i in range(self.mmu_num_gates):
+                    self.servo_angles[i].update(servo_angles[i])
         except Exception as e:
             raise self.config.error("Exception whilst parsing servo angles from 'mmu_vars.cfg': %s" % str(e))
 
@@ -1773,6 +1782,7 @@ class Mmu:
                 'servo': "Up" if self.servo_state == self.SERVO_UP_STATE else
                          "Down" if self.servo_state == self.SERVO_DOWN_STATE else
                          "Move" if self.servo_state == self.SERVO_MOVE_STATE else
+                         "Relax" if self.servo_state == self.SERVO_RELAX_STATE else
                          "Unknown",
                 'ttg_map': list(self.ttg_map),
                 'gate_status': list(self.gate_status),
@@ -2431,10 +2441,13 @@ class Mmu:
         self.servo_state = self.SERVO_UNKNOWN_STATE
 
     def _servo_save_pos(self, pos):
+        if not self.selector.is_homed or self.gate_selected < 0:
+            self.log_error("Can't save servo angle - selector not parked at gate")
+            return
         if self.servo_angle != self.SERVO_UNKNOWN_STATE:
-            self.servo_angles[pos] = self.servo_angle
+            self.servo_angles[self.gate_selected][pos] = self.servo_angle
             self._save_variable(self.VARS_MMU_SERVO_ANGLES, self.servo_angles, write=True)
-            self.log_info("Servo angle '%d' for position '%s' has been saved" % (self.servo_angle, pos))
+            self.log_info("Servo angle '%d' for gate '%d' and position '%s' has been saved" % (self.servo_angle, self.gate_selected, pos))
         else:
             self.log_info("Servo angle unknown")
 
@@ -2442,39 +2455,52 @@ class Mmu:
         if self.internal_test: return # Save servo while testing
         if self.gate_selected == self.TOOL_GATE_BYPASS: return
         if self.servo_state == self.SERVO_DOWN_STATE: return
-        self.log_debug("Setting servo to down (filament drive) position at angle: %d" % self.servo_angles['down'])
+        if not self.selector.is_homed or self.gate_selected < 0:
+            self.log_error("Must home MMU before engaging servo")
+            return
+        if self.gate_selected < 0:
+            self.log_error("Attempted to engage servo on invalid gate: %d" % (self.gate_selected))
+            return
+        self.log_debug("Setting servo to down (filament drive) position at gate %d and angle: %d" % (self.gate_selected, self.servo_angles[self.gate_selected]['down']))
         self.movequeues_wait()
-        self.servo.set_position(angle=self.servo_angles['down'], duration=None if self.servo_active_down or self.servo_always_active else self.servo_duration)
-        if self.servo_angle != self.servo_angles['down'] and buzz_gear and self.servo_buzz_gear_on_down > 0:
+        self.servo.set_position(angle=self.servo_angles[self.gate_selected]['down'], duration=None if self.servo_active_down or self.servo_always_active else self.servo_duration)
+        if self.servo_angle != self.servo_angles[self.gate_selected]['down'] and buzz_gear and self.servo_buzz_gear_on_down > 0:
             for i in range(self.servo_buzz_gear_on_down):
                 self._trace_filament_move(None, 0.8, speed=25, accel=self.gear_buzz_accel, encoder_dwell=None)
                 self._trace_filament_move(None, -0.8, speed=25, accel=self.gear_buzz_accel, encoder_dwell=None)
             self.movequeues_dwell(max(self.servo_dwell, self.servo_duration, 0))
-        # Have the motor back-off from the down position by a few degrees to relax gearbox backlash
-        self.log_debug("Relaxing servo from down position at angle: %d" % self.servo_relax_angle)
-        self.movequeues_dwell(max(self.servo_dwell, self.servo_duration, 0))
-        self.servo.set_position(angle=self.servo_relax_angle, duration=None if self.servo_active_down or self.servo_always_active else self.servo_duration)
-        self.servo_angle = self.servo_relax_angle 
-        self.servo_state = self.SERVO_DOWN_STATE
+        self._servo_relax()
         self._mmu_macro_event(self.MACRO_EVENT_FILAMENT_ENGAGED)
+
+    def _servo_relax(self): # Position servo just shy of the down position to relax gearbox backlash
+        if self.internal_test: return # Save servo while testing
+        if self.servo_always_active: return 
+        if self.servo_state == self.SERVO_RELAX_STATE: return
+        self.log_debug("Relaxing servo from down position at angle: %d" % self.servo_angles[self.gate_selected]['relax'])
+        if self.servo_angle != self.servo_angles[self.gate_selected]['relax']:
+            self.movequeues_wait()
+            self.servo.set_position(angle=self.servo_angles[self.gate_selected]['relax'], duration=self.servo_duration)
+            self.movequeues_dwell(max(self.servo_dwell, self.servo_duration, 0))
+            self.servo_angle = self.servo_angles[self.gate_selected]['relax']
+            self.servo_state = self.SERVO_RELAX_STATE 
 
     def _servo_move(self): # Position servo for selector movement
         if self.internal_test: return # Save servo while testing
         if self.servo_state == self.SERVO_MOVE_STATE: return
-        self.log_debug("Setting servo to move (filament hold) position at angle: %d" % self.servo_angles['move'])
-        if self.servo_angle != self.servo_angles['move']:
+        self.log_debug("Setting servo to move (filament hold) position at angle: %d" % self.servo_move_angle)
+        if self.servo_angle != self.servo_move_angle:
             self.movequeues_wait()
-            self.servo.set_position(angle=self.servo_angles['move'], duration=None if self.servo_always_active else self.servo_duration)
+            self.servo.set_position(angle=self.servo_move_angle, duration=None if self.servo_always_active else self.servo_duration)
             self.movequeues_dwell(max(self.servo_dwell, self.servo_duration, 0))
-            self.servo_angle = self.servo_angles['move']
+            self.servo_angle = self.servo_move_angle
             self.servo_state = self.SERVO_MOVE_STATE
 
     def _servo_up(self, measure=False):
         if self.internal_test: return 0. # Save servo while testing
         if self.servo_state == self.SERVO_UP_STATE: return 0.
-        self.log_debug("Setting servo to up (filament released) position at angle: %d" % self.servo_angles['up'])
+        self.log_debug("Setting servo to up (filament released) position at gate %d and angle: %d" % (self.gate_selected, self.servo_angles['up']))
         delta = 0.
-        if self.servo_angle != self.servo_angles['up']:
+        if self.servo_angle != self.servo_angles[self.gate_selected]['up']:
             self.movequeues_wait()
             if measure:
                 initial_encoder_position = self._get_encoder_distance(dwell=None)
@@ -2486,7 +2512,7 @@ class Mmu:
                 if delta > 0.:
                     self.log_debug("Spring in filament measured  %.1fmm - adjusting encoder" % delta)
                     self._set_encoder_distance(initial_encoder_position, dwell=None)
-        self.servo_angle = self.servo_angles['up']
+        self.servo_angle = self.servo_angles[self.gate_selected]['up']
         self.servo_state = self.SERVO_UP_STATE
         return delta
 
@@ -2591,7 +2617,7 @@ class Mmu:
             self.servo.set_position(angle=abs(mid+large)/2, duration=duration)
             self.movequeues_dwell(max(self.servo_duration, 0.5), mmu_toolhead=False)
             self.movequeues_wait()
-            if old_state == self.SERVO_DOWN_STATE:
+            if old_state == self.SERVO_DOWN_STATE or old_state == self.SERVO_RELAX_STATE:
                 self._servo_down(buzz_gear=False)
             elif old_state == self.SERVO_MOVE_STATE:
                 self._servo_move()
@@ -4898,7 +4924,7 @@ class Mmu:
 
             self._ensure_safe_extruder_temperature(wait=False)
 
-            synced = self.servo_state == self.SERVO_DOWN_STATE and not extruder_only
+            synced = (self.servo_state == self.SERVO_DOWN_STATE or self.servo_state == SERVO_RELAX_STATE) and not extruder_only
             if synced:
                 self._servo_down()
                 speed = self.extruder_sync_unload_speed
