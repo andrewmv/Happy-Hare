@@ -83,6 +83,17 @@ class MmuRunoutHelper:
         self.filament_present = is_filament_present
         eventtime = self.reactor.monotonic()
 
+        if self.name.startswith("mmu_pre_gate_"):
+            self.gcode.respond_info(
+                "DEBUG: %s state changed to %s at %.3f (enabled=%s, suppressed=%s)" % (
+                    self.name,
+                    "DETECTED" if is_filament_present else "NOT DETECTED",
+                    eventtime,
+                    self.sensor_enabled,
+                    eventtime < self.min_event_systime
+                )
+            )
+
         # Don't handle too early or if disabled
         if eventtime < self.min_event_systime or not self.sensor_enabled: return
         self._process_state_change(eventtime, is_filament_present)
